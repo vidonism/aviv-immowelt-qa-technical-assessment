@@ -1,0 +1,94 @@
+name: Playwright End-to-End Tests
+
+on:
+  push:
+    branches:
+      - 'vidonism/tests'
+  pull_request:
+    branches:
+      - 'vidonism/tests'
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
+jobs:
+  e2e-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Fetch repository source code
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # Setup Node.js environment for the App
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    # Install frontend dependencies
+    - name: Install Node Dependencies
+      run: npm install
+
+    # Start App and wait natively for Port 5173
+    - name: Start App & Wait for Port 5173
+      run: |
+        npm run dev -- --host 127.0.0.1 < /dev/null > vite-server.log 2>&1 &
+        # Small sleep just to give the OS a second to spin up the process
+        sleep 3
+
+    # Check connectivity
+    - name: Diagnose and Check Web App Load
+      run: |       
+        echo "=== Testing Network Connectivity via Curl ==="
+        # Retry curl up to 6 times (every 5 seconds) to give Vite time to bundle assets
+        for i in {1..6}; do
+          echo "Attempt $i: Checking http://127.0.0.1:5173..."
+          if curl -Is http://127.0.0.1:5173 | head -n 1; then
+            echo "Successfully connected to Web App!"
+            exit 0
+          fi
+          sleep 5
+        done
+        
+        echo "ERROR: Web application failed to load. Printing full network details:"
+        netstat -tuln || ss -tuln
+        exit 1
+
+    # Setup .NET 10 SDK environment
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    # Build the test project to restore tools and dependencies
+    - name: Build Test Project
+      run: dotnet build tests/DemoTests/DemoTests.csproj
+
+    # Install Playwright browser binaries required by .NET
+    - name: Install Playwright Browsers & Linux Dependencies
+      run: pwsh $(find . -name playwright.ps1 | head -n 1) install --with-deps
+      
+    - name: Install Playwright Edge Browser as well
+      run: pwsh $(find . -name playwright.ps1 | head -n 1) install msedge
+
+    # Execute xUnit tests and output results into a TRX file
+    - name: Run Playwright Tests
+      run: |
+        dotnet test tests/DemoTests/DemoTests.csproj --logger "trx;LogFileName=test-results.trx" --results-directory ./TestResults
+      env:
+        # Pass the URLs
+        TestBaseUrl: http://localhost:5173
+        APIBaseUrl: http://localhost:3001/api
+
+    # Upload test reports as a GitHub artifact (always runs even if tests fail)
+    - name: Publish Test Report Summary
+      if: always() 
+      uses: dorny/test-reporter@v1
+      with:
+        name: Playwright Test Results
+        path: "**/TestResults/*.trx" 
+        reporter: dotnet-trx
